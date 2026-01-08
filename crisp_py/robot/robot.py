@@ -49,6 +49,7 @@ class Robot:
         node: Node | None = None,
         namespace: str = "",
         spin_node: bool = True,
+        indep_plugin: bool = False,
         robot_config: RobotConfig | None = None,
         name: str = "robot_client",
     ) -> None:
@@ -58,6 +59,7 @@ class Robot:
             node (Node, optional): ROS2 node to use. If None, creates a new node.
             namespace (str, optional): ROS2 namespace for the robot.
             spin_node (bool, optional): Whether to spin the node in a separate thread.
+            indep_plugin (bool, optional): Whether to be used as an independent plugin in gym.
             robot_config (RobotConfig, optional): Robot configuration parameters.
             name (str, optional): Name of the robot client node.
         """
@@ -73,6 +75,7 @@ class Robot:
         self.config = robot_config if robot_config else FrankaConfig()
 
         self._prefix = f"{namespace}_" if namespace and self.config.use_prefix else ""
+        self._namespace = namespace if namespace else ""
 
         self.controller_switcher_client = ControllerSwitcherClient(self.node)
         self.joint_trajectory_controller_client = JointTrajectoryControllerClient(
@@ -144,34 +147,37 @@ class Robot:
             callback_group=ReentrantCallbackGroup(),
         )
 
-        if not self.config.use_tf_pose:
+        if indep_plugin:
+            if not self.config.use_tf_pose:
+                self.node.create_timer(
+                    1.0 / self.config.publish_frequency,
+                    self._callback_monitor.monitor(
+                        f"{namespace.capitalize()} Target Pose", self._callback_publish_target_pose
+                    ),
+                    ReentrantCallbackGroup(),
+                )
+            else:
+                self.node.create_timer(
+                    1.0 / self.config.publish_frequency,
+                    self._callback_update_tf_pose,
+                    ReentrantCallbackGroup(),
+                )
             self.node.create_timer(
                 1.0 / self.config.publish_frequency,
                 self._callback_monitor.monitor(
-                    f"{namespace.capitalize()} Target Pose", self._callback_publish_target_pose
+                    f"{namespace.capitalize()} Target Joint", self._callback_publish_target_joint
                 ),
                 ReentrantCallbackGroup(),
             )
-        else:
             self.node.create_timer(
                 1.0 / self.config.publish_frequency,
-                self._callback_update_tf_pose,
+                self._callback_monitor.monitor(
+                    f"{namespace.capitalize()} Target Wrench",self._callback_publish_target_wrench
+                ),
                 ReentrantCallbackGroup(),
             )
-        self.node.create_timer(
-            1.0 / self.config.publish_frequency,
-            self._callback_monitor.monitor(
-                f"{namespace.capitalize()} Target Joint", self._callback_publish_target_joint
-            ),
-            ReentrantCallbackGroup(),
-        )
-        self.node.create_timer(
-            1.0 / self.config.publish_frequency,
-            self._callback_publish_target_wrench,
-            ReentrantCallbackGroup(),
-        )
 
-        if spin_node:
+        if spin_node and not indep_plugin:
             threading.Thread(target=self._spin_node, daemon=True).start()
 
     @classmethod
@@ -622,6 +628,33 @@ class Robot:
         if rclpy.ok():
             rclpy.shutdown()
 
+    def set_downflow(self):
+        """Set downflow to controller manually.
+
+        This method publishes the downflow msgs to the respective topics.
+        Only be used when the robot is an independed plug-in component of gym environment.
+        """
+        if not self.config.use_tf_pose:
+            wrapped_pose_func = self._callback_monitor.monitor(
+                f"{self._namespace.capitalize()} Target Pose", 
+                self._callback_publish_target_pose
+            )
+            wrapped_pose_func()
+        else:
+            self._callback_update_tf_pose()
+        
+        wrapped_joint_func = self._callback_monitor.monitor(
+            f"{self._namespace.capitalize()} Target Joint", 
+            self._callback_publish_target_joint
+        )
+        wrapped_joint_func()
+        
+        wrapped_wrench_func = self._callback_monitor.monitor(
+            f"{self._namespace.capitalize()} Target Wrench", 
+            self._callback_publish_target_wrench
+        )
+        wrapped_wrench_func()
+            
 
 def make_robot(
     config_name: str | None = None,
